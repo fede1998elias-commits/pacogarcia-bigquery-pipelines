@@ -5,7 +5,7 @@ Tablas destino:
   vtex_data.daily_orders  — una fila por orden
   vtex_data.order_items   — una fila por item de cada orden
 
-INSERCIÓN: load_table_from_json (BATCH — NO streaming inserts — costo $0 en BQ).
+INSERCIÓN: load_table_from_json (BATCH — NO streaming inserts).
 
 Uso:
     python sync_vtex.py                          # últimos 365 días
@@ -371,7 +371,7 @@ def main():
     total_days = (end_date - start_date).days + 1
 
     print("SYNC Sync VTEX → BigQuery")
-    print(f"   INSERCIÓN  : load_table_from_json  ← BATCH (costo $0)")
+    print(f"   INSERCIÓN  : load_table_from_json  ← BATCH")
     print(f"   Período    : {start_date} → {end_date} ({total_days} días)")
     print(f"   Cuenta VTEX: {VTEX_ACCOUNT}")
     print(f"   Tablas     : {GCP_PROJECT}.{BQ_DATASET}.{TABLE_ORDERS}")

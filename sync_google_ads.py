@@ -6,7 +6,7 @@ Uso:
     python sync_google_ads.py              # últimos 365 días
     python sync_google_ads.py --days 1095  # ~3 años (histórico completo)
 
-INSERCIÓN: load_table_from_json (BATCH — NO streaming inserts — costo $0 en BQ).
+INSERCIÓN: load_table_from_json (BATCH — NO streaming inserts).
 """
 import os
 import sys
@@ -199,7 +199,7 @@ def main():
     start_date = end_date - timedelta(days=args.days - 1)
 
     print("SYNC Sync Google Ads → BigQuery")
-    print(f"   INSERCIÓN : load_table_from_json  ← BATCH (costo $0)")
+    print(f"   INSERCIÓN : load_table_from_json  ← BATCH")
     print(f"   Período   : {start_date.strftime('%Y-%m-%d')} → {end_date.strftime('%Y-%m-%d')} ({args.days} días)")
     print(f"   Cliente   : {CUSTOMER_ID}")
     print(f"   Destino   : {GCP_PROJECT}.{BQ_DATASET}.{BQ_TABLE}")
