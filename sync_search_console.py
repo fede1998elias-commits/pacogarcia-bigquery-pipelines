@@ -20,9 +20,9 @@ load_dotenv()
 sys.stdout.reconfigure(encoding="utf-8")
 
 # ── Configuración ─────────────────────────────────────────────────────────────
-SERVICE_ACCOUNT_FILE = os.environ.get("GOOGLE_SERVICE_ACCOUNT_FILE", "e-coomerce-484513-633cb3db894a.json")
-SITE_URL             = os.environ.get("SEARCH_CONSOLE_SITE_URL", "sc-domain:pacogarcia.com.ar")
-GCP_PROJECT          = "e-coomerce-484513"
+SERVICE_ACCOUNT_FILE = os.environ.get("GOOGLE_SERVICE_ACCOUNT_FILE")
+SITE_URL             = os.environ.get("SEARCH_CONSOLE_SITE_URL")
+GCP_PROJECT          = os.environ.get("GCP_PROJECT")
 BQ_DATASET           = "search_console_data"
 BQ_TABLE             = "daily_performance"
 

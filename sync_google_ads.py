@@ -20,10 +20,10 @@ load_dotenv()
 sys.stdout.reconfigure(encoding="utf-8")
 
 # ── Configuración ─────────────────────────────────────────────────────────────
-SERVICE_ACCOUNT_FILE = os.environ.get("GOOGLE_SERVICE_ACCOUNT_FILE", "e-coomerce-484513-633cb3db894a.json")
+SERVICE_ACCOUNT_FILE = os.environ.get("GOOGLE_SERVICE_ACCOUNT_FILE")
 YAML_FILE   = os.path.join(os.path.dirname(__file__), "google-ads.yaml")
-CUSTOMER_ID = os.environ.get("GOOGLE_ADS_CUSTOMER_ID", "8583465819")
-GCP_PROJECT = "e-coomerce-484513"
+CUSTOMER_ID = os.environ.get("GOOGLE_ADS_CUSTOMER_ID")
+GCP_PROJECT = os.environ.get("GCP_PROJECT")
 BQ_DATASET  = "google_ads_data"
 BQ_TABLE    = "daily_campaigns"
 CHUNK_DAYS  = 30   # días por llamada a la API de Ads

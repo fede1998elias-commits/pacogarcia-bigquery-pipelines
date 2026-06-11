@@ -23,9 +23,9 @@ load_dotenv()
 sys.stdout.reconfigure(encoding="utf-8")
 
 # ── Configuración ─────────────────────────────────────────────────────────────
-SERVICE_ACCOUNT_FILE = os.environ.get("GOOGLE_SERVICE_ACCOUNT_FILE", "e-coomerce-484513-633cb3db894a.json")
-VTEX_ACCOUNT = os.environ.get("VTEX_ACCOUNT", "pacogarcia")
-GCP_PROJECT  = "e-coomerce-484513"
+SERVICE_ACCOUNT_FILE = os.environ.get("GOOGLE_SERVICE_ACCOUNT_FILE")
+VTEX_ACCOUNT = os.environ.get("VTEX_ACCOUNT")
+GCP_PROJECT  = os.environ.get("GCP_PROJECT")
 BQ_DATASET   = "vtex_data"
 TABLE_ORDERS = "daily_orders"
 TABLE_ITEMS  = "order_items"
