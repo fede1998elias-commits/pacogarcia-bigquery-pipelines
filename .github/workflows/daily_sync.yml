@@ -1,0 +1,59 @@
+name: Daily Sync
+
+on:
+  schedule:
+    - cron: '0 12 * * 1-5'   # lunes a viernes 12:00 UTC = 09:00 Argentina
+  workflow_dispatch:            # permite trigger manual desde GitHub UI
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Write service account credentials
+        env:
+          SA_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+        run: echo "$SA_JSON" > service_account.json
+
+      - name: Write google-ads.yaml
+        run: |
+          cat > google-ads.yaml << EOF
+          developer_token: ${{ secrets.GOOGLE_ADS_DEVELOPER_TOKEN }}
+          client_id: ${{ secrets.GOOGLE_ADS_CLIENT_ID }}
+          client_secret: ${{ secrets.GOOGLE_ADS_CLIENT_SECRET }}
+          refresh_token: ${{ secrets.GOOGLE_ADS_REFRESH_TOKEN }}
+          login_customer_id: ${{ secrets.GOOGLE_ADS_LOGIN_CUSTOMER_ID }}
+          use_proto_plus: True
+          EOF
+
+      - name: Sync Search Console
+        continue-on-error: true
+        env:
+          GOOGLE_SERVICE_ACCOUNT_FILE: service_account.json
+          SEARCH_CONSOLE_SITE_URL: ${{ secrets.SEARCH_CONSOLE_SITE_URL }}
+        run: python sync_search_console.py --days 4
+
+      - name: Sync Google Ads
+        continue-on-error: true
+        env:
+          GOOGLE_SERVICE_ACCOUNT_FILE: service_account.json
+          GOOGLE_ADS_CUSTOMER_ID: ${{ secrets.GOOGLE_ADS_CUSTOMER_ID }}
+        run: python sync_google_ads.py --days 4
+
+      - name: Sync VTEX
+        continue-on-error: true
+        env:
+          GOOGLE_SERVICE_ACCOUNT_FILE: service_account.json
+          VTEX_ACCOUNT: ${{ secrets.VTEX_ACCOUNT }}
+          VTEX_APP_KEY: ${{ secrets.VTEX_APP_KEY }}
+          VTEX_APP_TOKEN: ${{ secrets.VTEX_APP_TOKEN }}
+        run: python sync_vtex.py --days 4
