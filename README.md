@@ -32,7 +32,7 @@ Carga métricas por campaña y día desde Google Ads a BigQuery.
 - **Particionado:** por `date` (DAY)
 - **Métricas:** costo, impresiones, clicks, CTR, CPC promedio, conversiones, valor de conversiones, ROAS
 - **Filtro:** solo campañas con `cost > 0`
-- **Inserción:** batch (`load_table_from_json`, costo $0 en BQ)
+- **Inserción:** batch (`load_table_from_json`, sin streaming inserts)
 - **Chunk size:** 30 días por llamada a la API
 
 ```bash
@@ -50,7 +50,7 @@ Carga órdenes e items de VTEX OMS a BigQuery. Maneja el límite de 3.000 órden
   - `vtex_data.order_items` — una fila por ítem de cada orden
 - **Particionado:** por `creation_date` (DAY) en ambas tablas
 - **Timezone:** fechas convertidas a hora Argentina (UTC-3, sin DST)
-- **Inserción:** batch (`load_table_from_json`, costo $0 en BQ)
+- **Inserción:** batch (`load_table_from_json`, sin streaming inserts)
 - **Cache de productos:** `product_cache.json` (TTL 24 h) vía `vtex.py`
 
 ```bash
