@@ -90,7 +90,7 @@ def get_loaded_dates(bq: bigquery.Client, table_ref: str) -> set:
         sql = f"SELECT DISTINCT CAST(date AS STRING) FROM `{table_ref}`"
         return {row[0] for row in bq.query(sql).result()}
     except Exception as e:
-        print(f"  ⚠️  get_loaded_dates error (continuando desde cero): {e}")
+        print(f"  WARN  get_loaded_dates error (continuando desde cero): {e}")
         return set()
 
 
@@ -133,10 +133,10 @@ def fetch_chunk(
         except Exception as e:
             if attempt < retries:
                 wait = 2 ** attempt
-                print(f"  ⚠️  Ads API error intento {attempt}/{retries}, retry en {wait}s: {e}")
+                print(f"  WARN  Ads API error intento {attempt}/{retries}, retry en {wait}s: {e}")
                 time.sleep(wait)
             else:
-                print(f"  ❌  Ads API error (agotados {retries} intentos): {e}")
+                print(f"  ERROR  Ads API error (agotados {retries} intentos): {e}")
                 return {}, True
 
     synced_at = datetime.utcnow().isoformat()
@@ -198,7 +198,7 @@ def main():
     end_date   = datetime.today() - timedelta(days=1)   # Ads tiene lag de 1 día
     start_date = end_date - timedelta(days=args.days - 1)
 
-    print("🔄 Sync Google Ads → BigQuery")
+    print("SYNC Sync Google Ads → BigQuery")
     print(f"   INSERCIÓN : load_table_from_json  ← BATCH (costo $0)")
     print(f"   Período   : {start_date.strftime('%Y-%m-%d')} → {end_date.strftime('%Y-%m-%d')} ({args.days} días)")
     print(f"   Cliente   : {CUSTOMER_ID}")
@@ -222,7 +222,7 @@ def main():
         cur += timedelta(days=1)
 
     if not dates_pending:
-        print("✅ Todo al día — no hay fechas nuevas.")
+        print("OK Todo al día — no hay fechas nuevas.")
         return
 
     skipped = args.days - len(dates_pending)
@@ -244,7 +244,7 @@ def main():
 
     for chunk in chunks:
         chunk_start, chunk_end = chunk[0], chunk[-1]
-        print(f"  📥 Ads API  {chunk_start} → {chunk_end} ({len(chunk)} días)...", flush=True)
+        print(f"  FETCH Ads API  {chunk_start} → {chunk_end} ({len(chunk)} días)...", flush=True)
 
         by_date, had_error = fetch_chunk(ads, chunk_start, chunk_end)
 
@@ -252,7 +252,7 @@ def main():
             api_errors += len(chunk)
             for ds in chunk:
                 processed += 1
-                print(f"  ❌ {ds}: error API  ({processed}/{len(dates_pending)})")
+                print(f"  ERROR {ds}: error API  ({processed}/{len(dates_pending)})")
             continue
 
         for ds in chunk:
@@ -261,20 +261,20 @@ def main():
 
             if not rows:
                 dates_empty += 1
-                print(f"  ⚪ {ds}: sin campañas con costo  ({processed}/{len(dates_pending)})")
+                print(f"  SKIP {ds}: sin campañas con costo  ({processed}/{len(dates_pending)})")
                 continue
 
             err = bq_load(bq, table_ref, rows)
             if err:
-                print(f"  ❌ {ds}: BQ error → {err}  ({processed}/{len(dates_pending)})")
+                print(f"  ERROR {ds}: BQ error → {err}  ({processed}/{len(dates_pending)})")
                 bq_errors += 1
             else:
-                print(f"  ✅ {ds}: {len(rows)} campañas  ({processed}/{len(dates_pending)})")
+                print(f"  OK {ds}: {len(rows)} campañas  ({processed}/{len(dates_pending)})")
                 total_rows += len(rows)
                 dates_ok   += 1
 
     print()
-    print(f"🎉 Listo.")
+    print(f"Done. Listo.")
     print(f"   Fechas cargadas : {dates_ok}")
     print(f"   Fechas sin datos: {dates_empty}")
     print(f"   Filas totales   : {total_rows:,}")

@@ -94,7 +94,7 @@ def get_loaded_keys(bq, table_ref) -> set:
         query = f"SELECT DISTINCT CAST(date AS STRING), search_type FROM `{table_ref}`"
         return {f"{row[0]}|{row[1]}" for row in bq.query(query).result()}
     except Exception as e:
-        print(f"  ⚠️  get_loaded_keys error (continuando desde cero): {e}")
+        print(f"  WARN  get_loaded_keys error (continuando desde cero): {e}")
         return set()
 
 
@@ -119,10 +119,10 @@ def fetch_day(sc, date_str: str, search_type: str, retries: int = 3) -> tuple[li
         except Exception as e:
             if attempt < retries:
                 wait = 2 ** attempt
-                print(f"  ⚠️  SC error {date_str} [{search_type}] (intento {attempt}/{retries}, retry en {wait}s): {e}")
+                print(f"  WARN  SC error {date_str} [{search_type}] (intento {attempt}/{retries}, retry en {wait}s): {e}")
                 time.sleep(wait)
             else:
-                print(f"  ❌  SC error {date_str} [{search_type}] (agotados {retries} intentos): {e}")
+                print(f"  ERROR  SC error {date_str} [{search_type}] (agotados {retries} intentos): {e}")
                 return [], True
 
     rows = []
@@ -156,7 +156,7 @@ def main():
     end_date   = datetime.today() - timedelta(days=2)
     start_date = end_date - timedelta(days=args.days - 1)
 
-    print(f"🔄 Sync Search Console → BigQuery")
+    print(f"SYNC Sync Search Console → BigQuery")
     print(f"   Período: {start_date.strftime('%Y-%m-%d')} → {end_date.strftime('%Y-%m-%d')} ({args.days} días)")
     print(f"   Dataset: {GCP_PROJECT}.{BQ_DATASET}.{BQ_TABLE}")
     print()
@@ -173,7 +173,7 @@ def main():
     print(f"   Preflight SC check en {preflight_date} [web]...", end=" ", flush=True)
     probe, err = fetch_day(sc, preflight_date, "web")
     if err:
-        print(f"❌ Error de API — abortando.")
+        print(f"ERROR Error de API — abortando.")
         return
     print(f"{'OK — ' + str(len(probe)) + ' filas' if probe else 'sin datos (fecha fuera del rango SC)'}")
     print()
@@ -189,7 +189,7 @@ def main():
         current += timedelta(days=1)
 
     if not combos:
-        print("✅ Todo al día — no hay combinaciones nuevas para cargar.")
+        print("OK Todo al día — no hay combinaciones nuevas para cargar.")
         return
 
     total_combos = args.days * len(SEARCH_TYPES)
@@ -214,21 +214,21 @@ def main():
             try:
                 job.result()
             except Exception as e:
-                print(f"  ❌ {date_str} [{search_type}]: BQ job failed → {e}")
+                print(f"  ERROR {date_str} [{search_type}]: BQ job failed → {e}")
                 bq_errors += 1
                 continue
             if job.errors:
-                print(f"  ❌ {date_str} [{search_type}]: BQ error → {job.errors}")
+                print(f"  ERROR {date_str} [{search_type}]: BQ error → {job.errors}")
                 bq_errors += 1
             else:
-                print(f"  ✅ {date_str} [{search_type}]: {len(rows)} filas  ({i}/{len(combos)})")
+                print(f"  OK {date_str} [{search_type}]: {len(rows)} filas  ({i}/{len(combos)})")
                 total_rows += len(rows)
         else:
             empty_days += 1
-            print(f"  ⚪ {date_str} [{search_type}]: sin datos  ({i}/{len(combos)})")
+            print(f"  SKIP {date_str} [{search_type}]: sin datos  ({i}/{len(combos)})")
 
     print()
-    print(f"🎉 Listo. {total_rows:,} filas cargadas | "
+    print(f"Done. Listo. {total_rows:,} filas cargadas | "
           f"{empty_days} sin datos | {api_errors} errores SC | {bq_errors} errores BQ")
 
 

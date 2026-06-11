@@ -135,7 +135,7 @@ def get_loaded_dates(bq: bigquery.Client, table_ref: str) -> set:
         sql = f"SELECT DISTINCT CAST(creation_date AS STRING) FROM `{table_ref}`"
         return {row[0] for row in bq.query(sql).result()}
     except Exception as e:
-        print(f"  ⚠️  get_loaded_dates error (desde cero): {e}")
+        print(f"  WARN  get_loaded_dates error (desde cero): {e}")
         return set()
 
 
@@ -228,7 +228,7 @@ def _fetch_recursive(
 
     if depth >= 5:
         # Límite de recursión: devolver lo que hay y loguear
-        print(f"\n    ⚠️  Ventana aún supera 3.000 ord en depth={depth} — cargando parcial")
+        print(f"\n    WARN  Ventana aún supera 3.000 ord en depth={depth} — cargando parcial")
         return orders
 
     # Dividir la ventana en dos mitades y recurrir
@@ -279,7 +279,7 @@ def fetch_orders_for_date(ars_date: date, retries: int = 3) -> list[dict] | None
         if not in_range:
             return []   # fallback VTEX — ninguna orden corresponde a este día
     except Exception as e:
-        print(f"    ⚠️  Probe falló ({e}), intentando igual", flush=True)
+        print(f"    WARN  Probe falló ({e}), intentando igual", flush=True)
 
     raw = _fetch_recursive(utc_start, utc_end, retries)
     if raw is None:
@@ -296,7 +296,7 @@ def fetch_orders_for_date(ars_date: date, retries: int = 3) -> list[dict] | None
 
     dupes = len(raw) - len(unique)
     if dupes:
-        print(f"    ℹ️  {dupes} duplicados eliminados", flush=True)
+        print(f"    INFO  {dupes} duplicados eliminados", flush=True)
 
     # Validar que las órdenes realmente pertenecen a este día en ARS.
     # VTEX devuelve las órdenes más recientes como fallback cuando no hay
@@ -309,7 +309,7 @@ def fetch_orders_for_date(ars_date: date, retries: int = 3) -> list[dict] | None
 
     out_of_range = len(unique) - len(valid)
     if out_of_range:
-        print(f"    ℹ️  {out_of_range} órdenes fuera de rango filtradas (fallback VTEX)", flush=True)
+        print(f"    INFO  {out_of_range} órdenes fuera de rango filtradas (fallback VTEX)", flush=True)
 
     return valid
 
@@ -332,7 +332,7 @@ def fetch_order_detail_raw(order_id: str, retries: int = 3) -> dict | None:
             if attempt < retries:
                 time.sleep(2 ** attempt)
             else:
-                print(f"    ⚠️  Detalle {order_id} falló: {e}")
+                print(f"    WARN  Detalle {order_id} falló: {e}")
                 return None
 
 
@@ -370,7 +370,7 @@ def main():
 
     total_days = (end_date - start_date).days + 1
 
-    print("🔄 Sync VTEX → BigQuery")
+    print("SYNC Sync VTEX → BigQuery")
     print(f"   INSERCIÓN  : load_table_from_json  ← BATCH (costo $0)")
     print(f"   Período    : {start_date} → {end_date} ({total_days} días)")
     print(f"   Cuenta VTEX: {VTEX_ACCOUNT}")
@@ -393,7 +393,7 @@ def main():
         cur += timedelta(days=1)
 
     if not dates_pending:
-        print("✅ Todo al día — no hay fechas nuevas.")
+        print("OK Todo al día — no hay fechas nuevas.")
         return
 
     skipped = total_days - len(dates_pending)
@@ -414,17 +414,17 @@ def main():
         ds = ars_date.isoformat()
         synced_at = datetime.utcnow().isoformat()
 
-        print(f"  📥 {ds} ...", end=" ", flush=True)
+        print(f"  FETCH {ds} ...", end=" ", flush=True)
 
         orders_raw = fetch_orders_for_date(ars_date)
         if orders_raw is None:
             api_errors += 1
-            print(f"❌ error API  ({processed}/{len(dates_pending)})")
+            print(f"ERROR error API  ({processed}/{len(dates_pending)})")
             continue
 
         if not orders_raw:
             dates_empty += 1
-            print(f"⚪ sin órdenes  ({processed}/{len(dates_pending)})")
+            print(f"SKIP sin órdenes  ({processed}/{len(dates_pending)})")
             continue
 
         print(f"{len(orders_raw)} órdenes → detalle...", end=" ", flush=True)
@@ -508,24 +508,24 @@ def main():
         # Cargar a BQ (batch)
         err_o = bq_load(bq, ref_orders, SCHEMA_ORDERS, order_rows)
         if err_o:
-            print(f"\n  ❌ {ds}: BQ orders error → {err_o}  ({processed}/{len(dates_pending)})")
+            print(f"\n  ERROR {ds}: BQ orders error → {err_o}  ({processed}/{len(dates_pending)})")
             bq_errors += 1
             continue
 
         if item_rows:
             err_i = bq_load(bq, ref_items, SCHEMA_ITEMS, item_rows)
             if err_i:
-                print(f"\n  ❌ {ds}: BQ items error → {err_i}  ({processed}/{len(dates_pending)})")
+                print(f"\n  ERROR {ds}: BQ items error → {err_i}  ({processed}/{len(dates_pending)})")
                 bq_errors += 1
                 continue
 
         total_orders += len(order_rows)
         total_items  += len(item_rows)
         dates_ok     += 1
-        print(f"✅ {len(order_rows)} órdenes / {len(item_rows)} items  ({processed}/{len(dates_pending)})")
+        print(f"OK {len(order_rows)} órdenes / {len(item_rows)} items  ({processed}/{len(dates_pending)})")
 
     print()
-    print("🎉 Listo.")
+    print("Done. Listo.")
     print(f"   Fechas cargadas     : {dates_ok}")
     print(f"   Fechas sin órdenes  : {dates_empty}")
     print(f"   Órdenes cargadas    : {total_orders:,}")
