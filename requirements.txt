@@ -1,0 +1,7 @@
+google-ads==31.0.0
+google-api-python-client==2.196.0
+google-auth==2.49.1
+google-auth-oauthlib==1.4.0
+google-cloud-bigquery==3.41.0
+python-dotenv==1.2.2
+requests==2.33.0

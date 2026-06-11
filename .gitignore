@@ -1,0 +1,6 @@
+.env
+*.json
+*.yaml
+*.log
+__pycache__/
+backfill_vtex.log
