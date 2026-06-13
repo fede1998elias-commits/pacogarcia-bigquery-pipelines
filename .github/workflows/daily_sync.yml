@@ -9,6 +9,9 @@ jobs:
   sync:
     runs-on: ubuntu-latest
 
+    env:
+      GCP_PROJECT: ${{ secrets.GCP_PROJECT }}
+
     steps:
       - uses: actions/checkout@v4
 
@@ -31,6 +34,7 @@ jobs:
           client_id: ${{ secrets.GOOGLE_ADS_CLIENT_ID }}
           client_secret: ${{ secrets.GOOGLE_ADS_CLIENT_SECRET }}
           refresh_token: ${{ secrets.GOOGLE_ADS_REFRESH_TOKEN }}
+          token_uri: https://oauth2.googleapis.com/token
           login_customer_id: ${{ secrets.GOOGLE_ADS_LOGIN_CUSTOMER_ID }}
           use_proto_plus: True
           EOF
@@ -40,6 +44,7 @@ jobs:
         env:
           GOOGLE_SERVICE_ACCOUNT_FILE: service_account.json
           SEARCH_CONSOLE_SITE_URL: ${{ secrets.SEARCH_CONSOLE_SITE_URL }}
+          GCP_PROJECT: ${{ secrets.GCP_PROJECT }}
         run: python sync_search_console.py --days 4
 
       - name: Sync Google Ads
@@ -47,6 +52,7 @@ jobs:
         env:
           GOOGLE_SERVICE_ACCOUNT_FILE: service_account.json
           GOOGLE_ADS_CUSTOMER_ID: ${{ secrets.GOOGLE_ADS_CUSTOMER_ID }}
+          GCP_PROJECT: ${{ secrets.GCP_PROJECT }}
         run: python sync_google_ads.py --days 4
 
       - name: Sync VTEX
@@ -56,4 +62,5 @@ jobs:
           VTEX_ACCOUNT: ${{ secrets.VTEX_ACCOUNT }}
           VTEX_APP_KEY: ${{ secrets.VTEX_APP_KEY }}
           VTEX_APP_TOKEN: ${{ secrets.VTEX_APP_TOKEN }}
+          GCP_PROJECT: ${{ secrets.GCP_PROJECT }}
         run: python sync_vtex.py --days 4
