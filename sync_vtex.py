@@ -5,7 +5,7 @@ Tablas destino:
   vtex_data.daily_orders  — una fila por orden
   vtex_data.order_items   — una fila por item de cada orden
 
-INSERCIÓN: load_table_from_json (BATCH — NO streaming inserts).
+INSERCIÓN: load_table_from_json (BATCH — NO streaming inserts — costo $0 en BQ).
 
 Uso:
     python sync_vtex.py                          # últimos 365 días
@@ -23,9 +23,9 @@ load_dotenv()
 sys.stdout.reconfigure(encoding="utf-8")
 
 # ── Configuración ─────────────────────────────────────────────────────────────
-SERVICE_ACCOUNT_FILE = os.environ.get("GOOGLE_SERVICE_ACCOUNT_FILE")
-VTEX_ACCOUNT = os.environ.get("VTEX_ACCOUNT")
-GCP_PROJECT  = os.environ.get("GCP_PROJECT")
+SERVICE_ACCOUNT_FILE = os.environ.get("GOOGLE_SERVICE_ACCOUNT_FILE", "e-coomerce-484513-633cb3db894a.json")
+VTEX_ACCOUNT = os.environ.get("VTEX_ACCOUNT", "pacogarcia")
+GCP_PROJECT  = "e-coomerce-484513"
 BQ_DATASET   = "vtex_data"
 TABLE_ORDERS = "daily_orders"
 TABLE_ITEMS  = "order_items"
@@ -76,6 +76,11 @@ SCHEMA_ORDERS = [
     bigquery.SchemaField("shipping_state",  "STRING",    mode="NULLABLE"),
     bigquery.SchemaField("shipping_method", "STRING",    mode="NULLABLE"),
     bigquery.SchemaField("seller_id",       "STRING",    mode="NULLABLE"),
+    bigquery.SchemaField("cancel_reason",   "STRING",    mode="NULLABLE"),
+    bigquery.SchemaField("utm_medium",      "STRING",    mode="NULLABLE"),
+    bigquery.SchemaField("installments",    "INTEGER",   mode="NULLABLE"),
+    bigquery.SchemaField("postal_code",     "STRING",    mode="NULLABLE"),
+    bigquery.SchemaField("discount_value",  "FLOAT",     mode="NULLABLE"),
     bigquery.SchemaField("synced_at",       "TIMESTAMP", mode="NULLABLE"),
 ]
 
@@ -135,7 +140,7 @@ def get_loaded_dates(bq: bigquery.Client, table_ref: str) -> set:
         sql = f"SELECT DISTINCT CAST(creation_date AS STRING) FROM `{table_ref}`"
         return {row[0] for row in bq.query(sql).result()}
     except Exception as e:
-        print(f"  WARN  get_loaded_dates error (desde cero): {e}")
+        print(f"  ⚠️  get_loaded_dates error (desde cero): {e}")
         return set()
 
 
@@ -149,6 +154,7 @@ def _parse_raw_order(o: dict) -> dict:
         "totalValue":   o.get("totalValue"),
         "paymentNames": o.get("paymentNames"),
         "utmSource":    marketing.get("utmSource"),
+        "utmMedium":    marketing.get("utmMedium"),
         "utmCampaign":  marketing.get("utmCampaign"),
     }
 
@@ -228,7 +234,7 @@ def _fetch_recursive(
 
     if depth >= 5:
         # Límite de recursión: devolver lo que hay y loguear
-        print(f"\n    WARN  Ventana aún supera 3.000 ord en depth={depth} — cargando parcial")
+        print(f"\n    ⚠️  Ventana aún supera 3.000 ord en depth={depth} — cargando parcial")
         return orders
 
     # Dividir la ventana en dos mitades y recurrir
@@ -279,7 +285,7 @@ def fetch_orders_for_date(ars_date: date, retries: int = 3) -> list[dict] | None
         if not in_range:
             return []   # fallback VTEX — ninguna orden corresponde a este día
     except Exception as e:
-        print(f"    WARN  Probe falló ({e}), intentando igual", flush=True)
+        print(f"    ⚠️  Probe falló ({e}), intentando igual", flush=True)
 
     raw = _fetch_recursive(utc_start, utc_end, retries)
     if raw is None:
@@ -296,7 +302,7 @@ def fetch_orders_for_date(ars_date: date, retries: int = 3) -> list[dict] | None
 
     dupes = len(raw) - len(unique)
     if dupes:
-        print(f"    INFO  {dupes} duplicados eliminados", flush=True)
+        print(f"    ℹ️  {dupes} duplicados eliminados", flush=True)
 
     # Validar que las órdenes realmente pertenecen a este día en ARS.
     # VTEX devuelve las órdenes más recientes como fallback cuando no hay
@@ -309,7 +315,7 @@ def fetch_orders_for_date(ars_date: date, retries: int = 3) -> list[dict] | None
 
     out_of_range = len(unique) - len(valid)
     if out_of_range:
-        print(f"    INFO  {out_of_range} órdenes fuera de rango filtradas (fallback VTEX)", flush=True)
+        print(f"    ℹ️  {out_of_range} órdenes fuera de rango filtradas (fallback VTEX)", flush=True)
 
     return valid
 
@@ -332,7 +338,7 @@ def fetch_order_detail_raw(order_id: str, retries: int = 3) -> dict | None:
             if attempt < retries:
                 time.sleep(2 ** attempt)
             else:
-                print(f"    WARN  Detalle {order_id} falló: {e}")
+                print(f"    ⚠️  Detalle {order_id} falló: {e}")
                 return None
 
 
@@ -342,6 +348,7 @@ def bq_load(bq: bigquery.Client, table_ref: str, schema, rows: list[dict]) -> st
     job_config = bigquery.LoadJobConfig(
         schema=schema,
         write_disposition="WRITE_APPEND",
+        schema_update_options=[bigquery.SchemaUpdateOption.ALLOW_FIELD_ADDITION],
     )
     job = bq.load_table_from_json(rows, table_ref, job_config=job_config)
     try:
@@ -351,6 +358,21 @@ def bq_load(bq: bigquery.Client, table_ref: str, schema, rows: list[dict]) -> st
     return str(job.errors) if job.errors else None
 
 
+def delete_date(bq: bigquery.Client, ref_orders: str, ref_items: str, ds: str) -> str | None:
+    """Borra todas las filas de una fecha (ambas tablas). Para reproceso. Retorna error o None."""
+    try:
+        for ref in (ref_orders, ref_items):
+            bq.query(
+                f"DELETE FROM `{ref}` WHERE creation_date = @d",
+                job_config=bigquery.QueryJobConfig(
+                    query_parameters=[bigquery.ScalarQueryParameter("d", "DATE", ds)]
+                ),
+            ).result()
+        return None
+    except Exception as e:
+        return str(e)
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 def main():
     parser = argparse.ArgumentParser()
@@ -358,10 +380,15 @@ def main():
                         help="Días hacia atrás desde hoy (default: 365)")
     parser.add_argument("--start-date", type=str, default=None,
                         help="Fecha de inicio explícita YYYY-MM-DD (override --days)")
+    parser.add_argument("--end-date", type=str, default=None,
+                        help="Fecha de fin explícita YYYY-MM-DD (default: hoy)")
+    parser.add_argument("--reprocess", action="store_true",
+                        help="Reprocesa fechas YA cargadas: borra cada fecha y la recarga "
+                             "(borrado por-fecha, no masivo). Por defecto se saltean.")
     args = parser.parse_args()
 
     today    = date.today()
-    end_date = today
+    end_date = date.fromisoformat(args.end_date) if args.end_date else today
 
     if args.start_date:
         start_date = date.fromisoformat(args.start_date)
@@ -370,18 +397,23 @@ def main():
 
     total_days = (end_date - start_date).days + 1
 
-    print("SYNC Sync VTEX → BigQuery")
-    print(f"   INSERCIÓN  : load_table_from_json  ← BATCH")
+    print("🔄 Sync VTEX → BigQuery")
+    print(f"   INSERCIÓN  : load_table_from_json  ← BATCH (costo $0)")
     print(f"   Período    : {start_date} → {end_date} ({total_days} días)")
     print(f"   Cuenta VTEX: {VTEX_ACCOUNT}")
     print(f"   Tablas     : {GCP_PROJECT}.{BQ_DATASET}.{TABLE_ORDERS}")
     print(f"              : {GCP_PROJECT}.{BQ_DATASET}.{TABLE_ITEMS}")
     print()
 
+    if args.reprocess:
+        print(f"   MODO        : REPROCESO (borra y recarga cada fecha del rango)")
+    print()
+
     bq = _bq_client()
     ref_orders, ref_items = setup_bq(bq)
 
-    loaded = get_loaded_dates(bq, ref_orders)
+    # En reproceso NO se saltean fechas: se recargan todas borrando por-fecha.
+    loaded = set() if args.reprocess else get_loaded_dates(bq, ref_orders)
     print(f"   Fechas ya en BQ: {len(loaded)}")
 
     dates_pending = []
@@ -393,7 +425,7 @@ def main():
         cur += timedelta(days=1)
 
     if not dates_pending:
-        print("OK Todo al día — no hay fechas nuevas.")
+        print("✅ Todo al día — no hay fechas nuevas.")
         return
 
     skipped = total_days - len(dates_pending)
@@ -414,17 +446,17 @@ def main():
         ds = ars_date.isoformat()
         synced_at = datetime.utcnow().isoformat()
 
-        print(f"  FETCH {ds} ...", end=" ", flush=True)
+        print(f"  📥 {ds} ...", end=" ", flush=True)
 
         orders_raw = fetch_orders_for_date(ars_date)
         if orders_raw is None:
             api_errors += 1
-            print(f"ERROR error API  ({processed}/{len(dates_pending)})")
+            print(f"❌ error API  ({processed}/{len(dates_pending)})")
             continue
 
         if not orders_raw:
             dates_empty += 1
-            print(f"SKIP sin órdenes  ({processed}/{len(dates_pending)})")
+            print(f"⚪ sin órdenes  ({processed}/{len(dates_pending)})")
             continue
 
         print(f"{len(orders_raw)} órdenes → detalle...", end=" ", flush=True)
@@ -455,11 +487,15 @@ def main():
                 .get("payments", [{}])
             )
             payment_name = payment[0].get("paymentSystemName") if payment else order.get("paymentNames")
+            installments = payment[0].get("installments") if payment else None
 
-            # Extraer provincia y método de envío del detalle
+            # Extraer provincia, método de envío y campos nuevos del detalle
             shipping_state  = None
             shipping_method = None
             seller_id       = None
+            postal_code     = None
+            cancel_reason   = None
+            discount_value  = None
             if detail:
                 try:
                     logistics = detail.get("shippingData", {}).get("logisticsInfo", [{}])
@@ -467,11 +503,25 @@ def main():
                         shipping_method = logistics[0].get("selectedSla") or logistics[0].get("slas", [{}])[0].get("id") if logistics[0].get("slas") else None
                     address = detail.get("shippingData", {}).get("address", {})
                     shipping_state = address.get("state")
+                    postal_code    = address.get("postalCode")
                     sellers = detail.get("sellers", [{}])
                     if sellers:
                         seller_id = sellers[0].get("id")
+                    cancel_reason = detail.get("cancelReason")
+                    for tot in (detail.get("totals") or []):
+                        if tot.get("id") == "Discounts":
+                            discount_value = round(abs(tot.get("value") or 0) / 100, 2)
+                            break
                 except Exception:
                     pass
+
+            # UTMs: leer del DETALLE (marketingData). El LISTADO de VTEX no incluye
+            # marketingData en su proyección, por eso utm_source/utm_campaign venían
+            # siempre NULL. Normalizamos '' -> None y dejamos el listado como fallback.
+            md = (detail or {}).get("marketingData") or {}
+            utm_source   = (md.get("utmSource")   or None) or order.get("utmSource")
+            utm_medium   = (md.get("utmMedium")   or None) or order.get("utmMedium")
+            utm_campaign = (md.get("utmCampaign") or None) or order.get("utmCampaign")
 
             order_rows.append({
                 "order_id":        order_id,
@@ -479,12 +529,17 @@ def main():
                 "status":          order.get("status"),
                 "total_value_ars": round((order.get("totalValue") or 0) / 100, 2),
                 "payment_name":    payment_name,
-                "utm_source":      order.get("utmSource"),
-                "utm_campaign":    order.get("utmCampaign"),
+                "utm_source":      utm_source,
+                "utm_medium":      utm_medium,
+                "utm_campaign":    utm_campaign,
                 "items_count":     len(items_raw),
                 "shipping_state":  shipping_state,
                 "shipping_method": shipping_method,
                 "seller_id":       seller_id,
+                "cancel_reason":   cancel_reason,
+                "installments":    installments,
+                "postal_code":     postal_code,
+                "discount_value":  discount_value,
                 "synced_at":       synced_at,
             })
 
@@ -505,27 +560,36 @@ def main():
                     "synced_at":    synced_at,
                 })
 
+        # Reproceso: borrar la fecha JUSTO antes de cargarla (nunca deja hueco
+        # mayor al día en vuelo si el job se interrumpe).
+        if args.reprocess:
+            del_err = delete_date(bq, ref_orders, ref_items, ds)
+            if del_err:
+                print(f"\n  ❌ {ds}: DELETE error → {del_err}  ({processed}/{len(dates_pending)})")
+                bq_errors += 1
+                continue
+
         # Cargar a BQ (batch)
         err_o = bq_load(bq, ref_orders, SCHEMA_ORDERS, order_rows)
         if err_o:
-            print(f"\n  ERROR {ds}: BQ orders error → {err_o}  ({processed}/{len(dates_pending)})")
+            print(f"\n  ❌ {ds}: BQ orders error → {err_o}  ({processed}/{len(dates_pending)})")
             bq_errors += 1
             continue
 
         if item_rows:
             err_i = bq_load(bq, ref_items, SCHEMA_ITEMS, item_rows)
             if err_i:
-                print(f"\n  ERROR {ds}: BQ items error → {err_i}  ({processed}/{len(dates_pending)})")
+                print(f"\n  ❌ {ds}: BQ items error → {err_i}  ({processed}/{len(dates_pending)})")
                 bq_errors += 1
                 continue
 
         total_orders += len(order_rows)
         total_items  += len(item_rows)
         dates_ok     += 1
-        print(f"OK {len(order_rows)} órdenes / {len(item_rows)} items  ({processed}/{len(dates_pending)})")
+        print(f"✅ {len(order_rows)} órdenes / {len(item_rows)} items  ({processed}/{len(dates_pending)})")
 
     print()
-    print("Done. Listo.")
+    print("🎉 Listo.")
     print(f"   Fechas cargadas     : {dates_ok}")
     print(f"   Fechas sin órdenes  : {dates_empty}")
     print(f"   Órdenes cargadas    : {total_orders:,}")
