@@ -40,6 +40,7 @@ jobs:
           EOF
 
       - name: Sync Search Console
+        id: search_console
         continue-on-error: true
         env:
           GOOGLE_SERVICE_ACCOUNT_FILE: service_account.json
@@ -48,6 +49,7 @@ jobs:
         run: python sync_search_console.py --days 4
 
       - name: Sync Google Ads
+        id: google_ads
         continue-on-error: true
         env:
           GOOGLE_SERVICE_ACCOUNT_FILE: service_account.json
@@ -56,6 +58,7 @@ jobs:
         run: python sync_google_ads.py --days 4
 
       - name: Sync VTEX
+        id: vtex
         continue-on-error: true
         env:
           GOOGLE_SERVICE_ACCOUNT_FILE: service_account.json
@@ -64,3 +67,23 @@ jobs:
           VTEX_APP_TOKEN: ${{ secrets.VTEX_APP_TOKEN }}
           GCP_PROJECT: ${{ secrets.GCP_PROJECT }}
         run: python sync_vtex.py --days 4
+
+      # Gate final: continue-on-error deja cada sync en verde aunque falle,
+      # así que revisamos el outcome REAL de cada una y fallamos el run si
+      # alguna rompió. Esto es lo que hace que el run se vea rojo de verdad.
+      - name: Fail run if any sync failed
+        if: always()
+        run: |
+          sc="${{ steps.search_console.outcome }}"
+          ads="${{ steps.google_ads.outcome }}"
+          vtex="${{ steps.vtex.outcome }}"
+          echo "Outcomes -> Search Console=$sc | Google Ads=$ads | VTEX=$vtex"
+          fail=0
+          if [ "$sc" = "failure" ];   then echo "::error::Search Console sync failed"; fail=1; fi
+          if [ "$ads" = "failure" ];  then echo "::error::Google Ads sync failed";     fail=1; fi
+          if [ "$vtex" = "failure" ]; then echo "::error::VTEX sync failed";           fail=1; fi
+          if [ "$fail" = "1" ]; then
+            echo "Al menos una sync fallo -- marcando el run como FAILED."
+            exit 1
+          fi
+          echo "Las 3 syncs terminaron OK."
