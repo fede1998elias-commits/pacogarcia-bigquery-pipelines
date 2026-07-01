@@ -14,8 +14,8 @@ _CACHE_FILE = Path(__file__).parent / "product_cache.json"
 _CACHE_TTL  = timedelta(hours=24)
 
 _ACCOUNT   = lambda: os.environ["VTEX_ACCOUNT"]
-_APP_KEY   = lambda: os.environ["VTEX_APP_KEY"]
-_APP_TOKEN = lambda: os.environ["VTEX_APP_TOKEN"]
+_APP_KEY   = lambda: os.environ["VTEX_APP_KEY"].strip()
+_APP_TOKEN = lambda: os.environ["VTEX_APP_TOKEN"].strip()
 
 _PAGE_SIZE = 100  # máximo permitido por la OMS API
 

@@ -41,8 +41,8 @@ from vtex import get_product_detail   # usa product_cache.json
 # ── Headers VTEX ──────────────────────────────────────────────────────────────
 def _vtex_headers() -> dict:
     return {
-        "X-VTEX-API-AppKey":   os.environ["VTEX_APP_KEY"],
-        "X-VTEX-API-AppToken": os.environ["VTEX_APP_TOKEN"],
+        "X-VTEX-API-AppKey":   os.environ["VTEX_APP_KEY"].strip(),
+        "X-VTEX-API-AppToken": os.environ["VTEX_APP_TOKEN"].strip(),
         "Accept":              "application/json",
         "Content-Type":        "application/json",
     }
