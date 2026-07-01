@@ -2,7 +2,7 @@ name: Daily Sync
 
 on:
   schedule:
-    - cron: '0 12 * * 1-5'   # lunes a viernes 12:00 UTC = 09:00 Argentina
+    - cron: '0 12 * * *'   # todos los días 12:00 UTC = 09:00 Argentina
   workflow_dispatch:            # permite trigger manual desde GitHub UI
 
 jobs:
