@@ -7,10 +7,21 @@ Tablas destino:
 
 INSERCIÓN: load_table_from_json (BATCH — NO streaming inserts — costo $0 en BQ).
 
+IDEMPOTENCIA: toda fecha que ya tenga filas se borra (DELETE por fecha) justo
+antes de recargarse, así correr la misma fecha N veces deja siempre el mismo
+resultado. Nunca duplica.
+
+VENTANA MÓVIL: los últimos --refresh-days días se recargan SIEMPRE, aunque ya
+estén en BQ. Sin esto, el día en curso queda cargado con las órdenes que había
+a la hora del run (media mañana) y las corridas siguientes lo saltean para
+siempre, perdiendo todo el pico de ventas de la tarde.
+
 Uso:
-    python sync_vtex.py                          # últimos 365 días
+    python sync_vtex.py                          # últimos 365 días (+ refresh de 7)
     python sync_vtex.py --days 730               # últimos 2 años
     python sync_vtex.py --start-date 2021-01-01  # histórico completo desde esa fecha
+    python sync_vtex.py --days 30 --refresh-days 7   # lo que corre el daily_sync
+    python sync_vtex.py --reprocess --start-date 2026-06-10 --end-date 2026-07-28  # backfill
 """
 import os
 import sys
@@ -383,8 +394,13 @@ def main():
     parser.add_argument("--end-date", type=str, default=None,
                         help="Fecha de fin explícita YYYY-MM-DD (default: hoy)")
     parser.add_argument("--reprocess", action="store_true",
-                        help="Reprocesa fechas YA cargadas: borra cada fecha y la recarga "
-                             "(borrado por-fecha, no masivo). Por defecto se saltean.")
+                        help="Reprocesa TODAS las fechas del rango, incluso las ya cargadas: "
+                             "borra cada fecha y la recarga (borrado por-fecha, no masivo).")
+    parser.add_argument("--refresh-days", type=int, default=7,
+                        help="Ventana móvil que SIEMPRE se recarga, aunque ya esté en BQ "
+                             "(default: 7). Imprescindible: el día en curso se sincroniza "
+                             "a media mañana y queda truncado, así que las corridas "
+                             "siguientes tienen que volver a pisarlo. 0 = desactivar.")
     args = parser.parse_args()
 
     today    = date.today()
@@ -405,22 +421,34 @@ def main():
     print(f"              : {GCP_PROJECT}.{BQ_DATASET}.{TABLE_ITEMS}")
     print()
 
+    # Ventana móvil que se recarga siempre. Una fecha sincronizada HOY quedó
+    # cortada a la hora del run (VTEX sigue recibiendo órdenes el resto del día),
+    # así que reprocesarla los días siguientes es lo que garantiza el día completo.
+    refresh_from = (end_date - timedelta(days=args.refresh_days - 1)
+                    if args.refresh_days > 0 else None)
+
     if args.reprocess:
         print(f"   MODO        : REPROCESO (borra y recarga cada fecha del rango)")
+    elif refresh_from:
+        print(f"   Ventana móvil: {refresh_from} → {end_date} "
+              f"(se recarga siempre, {args.refresh_days} días)")
     print()
 
     bq = _bq_client()
     ref_orders, ref_items = setup_bq(bq)
 
-    # En reproceso NO se saltean fechas: se recargan todas borrando por-fecha.
-    loaded = set() if args.reprocess else get_loaded_dates(bq, ref_orders)
+    # loaded se calcula SIEMPRE: además de decidir qué saltear, dice qué fechas
+    # hay que borrar antes de recargar para no duplicar filas.
+    loaded = get_loaded_dates(bq, ref_orders)
     print(f"   Fechas ya en BQ: {len(loaded)}")
 
     dates_pending = []
     cur = start_date
     while cur <= end_date:
         ds = cur.isoformat()
-        if ds not in loaded:
+        nueva      = ds not in loaded
+        en_ventana = refresh_from is not None and cur >= refresh_from
+        if args.reprocess or nueva or en_ventana:
             dates_pending.append(cur)
         cur += timedelta(days=1)
 
@@ -429,7 +457,7 @@ def main():
         return
 
     skipped = total_days - len(dates_pending)
-    print(f"   Fechas a cargar: {len(dates_pending)} (skipping {skipped} ya cargadas)")
+    print(f"   Fechas a cargar: {len(dates_pending)} (skipping {skipped} ya cargadas y cerradas)")
     print()
 
     total_orders  = 0
@@ -560,9 +588,10 @@ def main():
                     "synced_at":    synced_at,
                 })
 
-        # Reproceso: borrar la fecha JUSTO antes de cargarla (nunca deja hueco
-        # mayor al día en vuelo si el job se interrumpe).
-        if args.reprocess:
+        # Si la fecha ya tenía filas, borrarla JUSTO antes de recargarla: así la
+        # carga es idempotente (nunca duplica) y nunca deja hueco mayor al día en
+        # vuelo si el job se interrumpe. Aplica a --reprocess y a la ventana móvil.
+        if ds in loaded:
             del_err = delete_date(bq, ref_orders, ref_items, ds)
             if del_err:
                 print(f"\n  ❌ {ds}: DELETE error → {del_err}  ({processed}/{len(dates_pending)})")

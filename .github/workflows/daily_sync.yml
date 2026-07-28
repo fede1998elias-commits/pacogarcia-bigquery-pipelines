@@ -57,6 +57,14 @@ jobs:
           GCP_PROJECT: ${{ secrets.GCP_PROJECT }}
         run: python sync_google_ads.py --days 4
 
+      # --refresh-days 7 es lo que evita el bug de truncado: este run carga el día
+      # en curso incompleto (todavía faltan las ventas de la tarde), así que los
+      # 7 días previos se vuelven a pisar siempre. El DELETE por fecha lo hace
+      # idempotente, no duplica.
+      # --days 30 (y no 7) para que un corte del pipeline de más de una semana se
+      # recupere solo: las fechas de los últimos 30 días que NO estén en BQ se
+      # cargan igual. Las que ya están y quedaron fuera de la ventana móvil se
+      # saltean, así que no cuesta nada cuando no hay agujeros.
       - name: Sync VTEX
         id: vtex
         continue-on-error: true
@@ -66,7 +74,23 @@ jobs:
           VTEX_APP_KEY: ${{ secrets.VTEX_APP_KEY }}
           VTEX_APP_TOKEN: ${{ secrets.VTEX_APP_TOKEN }}
           GCP_PROJECT: ${{ secrets.GCP_PROJECT }}
-        run: python sync_vtex.py --days 4
+        run: python sync_vtex.py --days 30 --refresh-days 7
+
+      # Guardrail: compara VTEX contra BQ día por día y rompe el run si falta
+      # una sola orden. Audita días CERRADOS (excluye hoy, que es parcial por
+      # definición), así que valida el trabajo de los runs anteriores.
+      # Los 30 días son los mismos de los que se hace cargo la sync: todo lo que
+      # el step anterior es responsable de cargar, este step lo verifica.
+      - name: Verify VTEX integrity
+        id: vtex_verify
+        continue-on-error: true
+        env:
+          GOOGLE_SERVICE_ACCOUNT_FILE: service_account.json
+          VTEX_ACCOUNT: ${{ secrets.VTEX_ACCOUNT }}
+          VTEX_APP_KEY: ${{ secrets.VTEX_APP_KEY }}
+          VTEX_APP_TOKEN: ${{ secrets.VTEX_APP_TOKEN }}
+          GCP_PROJECT: ${{ secrets.GCP_PROJECT }}
+        run: python verify_vtex.py --days 30
 
       # Gate final: continue-on-error deja cada sync en verde aunque falle,
       # así que revisamos el outcome REAL de cada una y fallamos el run si
@@ -77,13 +101,18 @@ jobs:
           sc="${{ steps.search_console.outcome }}"
           ads="${{ steps.google_ads.outcome }}"
           vtex="${{ steps.vtex.outcome }}"
-          echo "Outcomes -> Search Console=$sc | Google Ads=$ads | VTEX=$vtex"
+          ver="${{ steps.vtex_verify.outcome }}"
+          echo "Outcomes -> Search Console=$sc | Google Ads=$ads | VTEX=$vtex | VTEX verify=$ver"
           fail=0
           if [ "$sc" = "failure" ];   then echo "::error::Search Console sync failed"; fail=1; fi
           if [ "$ads" = "failure" ];  then echo "::error::Google Ads sync failed";     fail=1; fi
           if [ "$vtex" = "failure" ]; then echo "::error::VTEX sync failed";           fail=1; fi
+          if [ "$ver" = "failure" ]; then
+            echo "::error::VTEX integrity check failed -- hay ordenes de VTEX que no estan en BigQuery. Ver el log del step 'Verify VTEX integrity'."
+            fail=1
+          fi
           if [ "$fail" = "1" ]; then
-            echo "Al menos una sync fallo -- marcando el run como FAILED."
+            echo "Al menos un step fallo -- marcando el run como FAILED."
             exit 1
           fi
-          echo "Las 3 syncs terminaron OK."
+          echo "Las 3 syncs y el chequeo de integridad de VTEX terminaron OK."

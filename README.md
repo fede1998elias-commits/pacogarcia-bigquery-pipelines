@@ -52,12 +52,43 @@ Carga órdenes e items de VTEX OMS a BigQuery. Maneja el límite de 3.000 órden
 - **Timezone:** fechas convertidas a hora Argentina (UTC-3, sin DST)
 - **Inserción:** batch (`load_table_from_json`, sin streaming inserts)
 - **Cache de productos:** `product_cache.json` (TTL 24 h) vía `vtex.py`
+- **Ventana móvil:** los últimos `--refresh-days` días (default 7) se recargan **siempre**
+- **Idempotencia:** toda fecha con filas se borra (DELETE por fecha) justo antes de recargarse
 
 ```bash
-python sync_vtex.py                          # últimos 365 días
+python sync_vtex.py                          # últimos 365 días (+ refresh de 7)
 python sync_vtex.py --days 730               # últimos 2 años
 python sync_vtex.py --start-date 2021-01-01  # histórico completo desde esa fecha
+python sync_vtex.py --days 30 --refresh-days 7 # lo que corre el daily_sync
+python sync_vtex.py --reprocess --start-date 2026-06-10 --end-date 2026-07-21  # backfill
 ```
+
+> **Por qué la ventana móvil:** el sync corre a media mañana, así que el día en curso
+> se carga sin las ventas de la tarde (el pico es 13–20 h ART). Antes, `get_loaded_dates()`
+> salteaba esa fecha para siempre y el día quedaba truncado. Entre 2026-06-10 y 2026-07-28
+> eso costó 850 órdenes (BQ tenía el 38,8 % de las ventas reales). Recargar los últimos
+> 7 días en cada run es lo que cierra el agujero.
+
+---
+
+### `verify_vtex.py`
+Guardrail de integridad: compara VTEX contra BigQuery **día por día** y devuelve exit 1 si falta alguna orden. Corre en el daily sync después de `sync_vtex.py`, y hace fallar el run.
+
+- Compara **conjuntos de `order_id`** (no cantidades): un faltante + un sobrante no se cancelan
+- Audita días **cerrados** — excluye el día en curso, que es parcial por definición
+- Chequea además `order_id` duplicados y órdenes con `items_count > 0` sin filas en `order_items`
+- **Falla** con: faltantes, duplicados, órdenes sin items, o fechas que no se pudieron verificar
+- **Sólo avisa** con: filas de más en BQ (no son ventas perdidas)
+
+```bash
+python verify_vtex.py --days 30                # lo que corre el daily_sync
+python verify_vtex.py --days 30 --warn-only    # auditoría sin romper el run
+python verify_vtex.py --start-date 2026-06-10 --end-date 2026-07-28
+```
+
+> La ventana de 30 días es la misma de la que se hace cargo `sync_vtex.py --days 30`:
+> todo lo que la sync es responsable de cargar queda verificado. Un corte del pipeline
+> de más de una semana se recupera solo y el guardrail lo confirma.
 
 ---
 
@@ -125,9 +156,14 @@ pip install -r requirements.txt
 ## Uso típico (daily sync)
 
 ```bash
-python sync_search_console.py
-python sync_google_ads.py
-python sync_vtex.py
+python sync_search_console.py --days 4
+python sync_google_ads.py --days 4
+python sync_vtex.py --days 30 --refresh-days 7
+python verify_vtex.py --days 30
 ```
 
-Los tres scripts son idempotentes: detectan las fechas ya cargadas en BigQuery y solo procesan las que faltan. Se pueden programar con Windows Task Scheduler o cualquier orquestador de tareas.
+Es lo que corre `.github/workflows/daily_sync.yml` (todos los días 12:00 UTC = 09:00 ART).
+
+Los scripts son idempotentes: detectan las fechas ya cargadas en BigQuery y no duplican.
+Search Console y Google Ads saltean las fechas ya cargadas; VTEX además **recarga siempre**
+los últimos 7 días, porque el día en curso se sincroniza incompleto (ver arriba).
