@@ -48,6 +48,13 @@ jobs:
           GCP_PROJECT: ${{ secrets.GCP_PROJECT }}
         run: python sync_search_console.py --days 4
 
+      # --refresh-days 21 es lo que evita que las conversiones queden congeladas:
+      # Google sigue atribuyendo hacia atrás (ventana de clic de 30 días + DDA),
+      # así que una fecha capturada a D+1 tiene ~2/3 de sus conversiones finales.
+      # La curva medida se aplana a los ~15 días; 21 cubre la cola y tolera un
+      # retraso del pipeline. El DELETE por fecha lo hace idempotente, no duplica.
+      # --days 30 (y no 21) para que un corte de más de tres semanas se recupere
+      # solo, igual que en VTEX. El costo NO se ve afectado por el rezago.
       - name: Sync Google Ads
         id: google_ads
         continue-on-error: true
@@ -55,7 +62,7 @@ jobs:
           GOOGLE_SERVICE_ACCOUNT_FILE: service_account.json
           GOOGLE_ADS_CUSTOMER_ID: ${{ secrets.GOOGLE_ADS_CUSTOMER_ID }}
           GCP_PROJECT: ${{ secrets.GCP_PROJECT }}
-        run: python sync_google_ads.py --days 4
+        run: python sync_google_ads.py --days 30 --refresh-days 21
 
       # --refresh-days 7 es lo que evita el bug de truncado: este run carga el día
       # en curso incompleto (todavía faltan las ventas de la tarde), así que los

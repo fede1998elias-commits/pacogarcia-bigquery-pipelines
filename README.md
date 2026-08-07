@@ -35,10 +35,24 @@ Carga métricas por campaña y día desde Google Ads a BigQuery.
 - **Inserción:** batch (`load_table_from_json`, sin streaming inserts)
 - **Chunk size:** 30 días por llamada a la API
 
+- **Ventana móvil:** los últimos `--refresh-days` días (default 21) se recargan **siempre**
+- **Idempotencia:** toda fecha con filas se borra (DELETE por fecha) justo antes de recargarse
+
 ```bash
-python sync_google_ads.py              # últimos 365 días
-python sync_google_ads.py --days 1095  # ~3 años (histórico completo)
+python sync_google_ads.py                              # 30 días (+ refresh de 21)
+python sync_google_ads.py --days 30 --refresh-days 21  # lo que corre el daily_sync
+python sync_google_ads.py --days 1095 --refresh-days 0 # histórico, sin refrescar
+python sync_google_ads.py --reprocess --days 60        # backfill correctivo
 ```
+
+> **Por qué la ventana móvil:** Google sigue atribuyendo conversiones hacia atrás
+> durante semanas (ventana de clic de 30 días en la conversión primaria + remodelado
+> del modelo data-driven). Una fecha capturada a D+1 tiene sólo ~2/3 de sus
+> conversiones finales, así que si nunca se refresca queda congelada y subestimada:
+> medido contra la API daba conversiones -31% y ROAS 6,92 contra 9,77 real. El
+> **costo no se mueve** — se cierra a D+1 —, sólo conversiones y su valor. La curva
+> de maduración se aplana a los ~15 días; 21 cubre la cola y da margen si el
+> pipeline estuvo caído.
 
 ---
 
@@ -157,7 +171,7 @@ pip install -r requirements.txt
 
 ```bash
 python sync_search_console.py --days 4
-python sync_google_ads.py --days 4
+python sync_google_ads.py --days 30 --refresh-days 21
 python sync_vtex.py --days 30 --refresh-days 7
 python verify_vtex.py --days 30
 ```

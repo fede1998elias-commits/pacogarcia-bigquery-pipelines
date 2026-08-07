@@ -2,9 +2,21 @@
 sync_google_ads.py
 Carga datos de Google Ads a BigQuery — tabla por día y campaña.
 
+IDEMPOTENCIA: toda fecha que ya tenga filas se borra (DELETE por fecha) justo
+antes de recargarse. Correr la misma fecha N veces deja siempre el mismo
+resultado. Nunca duplica.
+
+VENTANA MÓVIL: los últimos --refresh-days días se recargan SIEMPRE, aunque ya
+estén en BQ. Sin esto cada fecha se capturaba una sola vez a D+1 y quedaba
+congelada, pero Google sigue atribuyendo conversiones ~2 semanas hacia atrás
+(ventana de clic de 30 días + remodelado DDA): las conversiones quedaban
+subestimadas ~31% y el ROAS daba 6,92 contra 9,77 real. El costo NO se mueve.
+
 Uso:
-    python sync_google_ads.py              # últimos 365 días
-    python sync_google_ads.py --days 1095  # ~3 años (histórico completo)
+    python sync_google_ads.py                              # 30 días (+ refresh de 21)
+    python sync_google_ads.py --days 30 --refresh-days 21  # lo que corre el daily_sync
+    python sync_google_ads.py --days 1095 --refresh-days 0 # histórico, sin refrescar
+    python sync_google_ads.py --reprocess --days 60        # backfill correctivo
 
 INSERCIÓN: load_table_from_json (BATCH — NO streaming inserts).
 """
@@ -186,12 +198,41 @@ def bq_load(bq: bigquery.Client, table_ref: str, rows: list[dict]) -> str | None
     return None
 
 
+def delete_date(bq: bigquery.Client, table_ref: str, ds: str) -> str | None:
+    """Borra las filas de una fecha. Hace la recarga idempotente: nunca duplica.
+    La tabla está particionada por `date`, así que el filtro poda la partición y
+    el DELETE procesa ~24 bytes."""
+    try:
+        bq.query(
+            f"DELETE FROM `{table_ref}` WHERE date = @d",
+            job_config=bigquery.QueryJobConfig(
+                query_parameters=[bigquery.ScalarQueryParameter("d", "DATE", ds)]
+            ),
+        ).result()
+        return None
+    except Exception as e:
+        return str(e)
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--days", type=int, default=365,
-        help="Días hacia atrás (default: 365 | histórico completo: 1095)",
+        "--days", type=int, default=30,
+        help="Días hacia atrás (default: 30 | histórico completo: 1095)",
+    )
+    parser.add_argument(
+        "--refresh-days", type=int, default=21,
+        help="Ventana móvil que SIEMPRE se recarga, aunque ya esté en BQ "
+             "(default: 21). Imprescindible: Google sigue atribuyendo "
+             "conversiones hacia atrás, así que una fecha capturada a D+1 queda "
+             "subestimada ~31%%. La curva se aplana a los ~15 días; 21 cubre la "
+             "cola y tolera un retraso del pipeline. 0 = desactivar.",
+    )
+    parser.add_argument(
+        "--reprocess", action="store_true",
+        help="Reprocesa TODAS las fechas del rango, incluso las ya cargadas: "
+             "borra cada fecha y la recarga (borrado por-fecha, no masivo).",
     )
     args = parser.parse_args()
 
@@ -203,12 +244,26 @@ def main():
     print(f"   Período   : {start_date.strftime('%Y-%m-%d')} → {end_date.strftime('%Y-%m-%d')} ({args.days} días)")
     print(f"   Cliente   : {CUSTOMER_ID}")
     print(f"   Destino   : {GCP_PROJECT}.{BQ_DATASET}.{BQ_TABLE}")
+
+    # Ventana móvil que se recarga siempre. Una fecha capturada a D+1 tiene sólo
+    # ~2/3 de sus conversiones finales: Google sigue atribuyendo durante semanas.
+    # Refrescarla hasta que madure es lo que hace que el ROAS de BQ cuadre.
+    refresh_from = (end_date - timedelta(days=args.refresh_days - 1)
+                    if args.refresh_days > 0 else None)
+
+    if args.reprocess:
+        print(f"   MODO      : REPROCESO (borra y recarga cada fecha del rango)")
+    elif refresh_from:
+        print(f"   Ventana móvil: {refresh_from.strftime('%Y-%m-%d')} → "
+              f"{end_date.strftime('%Y-%m-%d')} (se recarga siempre, {args.refresh_days} días)")
     print()
 
     ads = _ads_client()
     bq  = _bq_client()
 
     table_ref = setup_bq(bq)
+    # loaded se calcula SIEMPRE: además de decidir qué saltear, dice qué fechas
+    # hay que borrar antes de recargar para no duplicar filas.
     loaded    = get_loaded_dates(bq, table_ref)
     print(f"   Fechas ya en BQ: {len(loaded)}")
 
@@ -217,7 +272,9 @@ def main():
     cur = start_date
     while cur <= end_date:
         ds = cur.strftime("%Y-%m-%d")
-        if ds not in loaded:
+        nueva      = ds not in loaded
+        en_ventana = refresh_from is not None and cur >= refresh_from
+        if args.reprocess or nueva or en_ventana:
             dates_pending.append(ds)
         cur += timedelta(days=1)
 
@@ -226,7 +283,8 @@ def main():
         return
 
     skipped = args.days - len(dates_pending)
-    print(f"   Fechas a cargar: {len(dates_pending)} (skipping {skipped} ya cargadas)")
+    print(f"   Fechas a cargar: {len(dates_pending)} "
+          f"(skipping {skipped} ya cargadas y maduras)")
     print()
 
     # Dividir en chunks de CHUNK_DAYS días
@@ -263,6 +321,20 @@ def main():
                 dates_empty += 1
                 print(f"  SKIP {ds}: sin campañas con costo  ({processed}/{len(dates_pending)})")
                 continue
+
+            # Borrar JUSTO antes de recargar, con las filas nuevas ya en memoria:
+            # así la carga es idempotente y un fallo de la API de Ads (que corta
+            # más arriba, en had_error) nunca puede dejar la fecha vacía.
+            # Si la fecha vuelve sin filas se saltea arriba y NO se borra: el
+            # costo nunca se revisa hacia atrás, así que una fecha con gasto no
+            # puede quedarse sin campañas — sería un problema de la API, no un
+            # dato real, y borrar destruiría data buena.
+            if ds in loaded:
+                del_err = delete_date(bq, table_ref, ds)
+                if del_err:
+                    print(f"  ERROR {ds}: DELETE error → {del_err}  ({processed}/{len(dates_pending)})")
+                    bq_errors += 1
+                    continue
 
             err = bq_load(bq, table_ref, rows)
             if err:
