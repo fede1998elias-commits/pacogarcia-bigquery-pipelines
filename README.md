@@ -1,7 +1,7 @@
 # pacogarcia-bigquery-pipelines
 
 Scripts de sincronización de datos de ecommerce hacia BigQuery (GCP).  
-Fuentes: **Google Search Console**, **Google Ads** y **VTEX OMS**.
+Fuentes: **Google Search Console**, **Google Ads**, **Meta Ads** y **VTEX OMS**.
 
 ---
 
@@ -113,6 +113,31 @@ No se ejecuta directamente; es importado por `sync_vtex.py`.
 
 ---
 
+### `sync_meta_ads.py`
+Carga Meta Ads (Graph API v21.0, sin SDK) en **dos** tablas particionadas por fecha:
+
+| Tabla | Nivel | Para qué |
+|---|---|---|
+| `meta_ads.ad_insights` | `ad` | métricas sumables: spend, impressions, clicks, ctr, cpc, cpm, purchases, revenue |
+| `meta_ads.campaign_insights` | `campaign` | **sólo** por `reach` y `frequency` — Meta deduplica usuarios, así que no se pueden derivar sumando desde `ad_insights` |
+
+```bash
+python sync_meta_ads.py                                    # lo que corre el daily_sync: ventana móvil 30 días
+python sync_meta_ads.py --backfill                         # histórico completo desde la creación de la cuenta
+python sync_meta_ads.py --since 2026-03-01 --until 2026-03-31
+```
+
+- **Ventana móvil de 30 días** en la corrida diaria: Meta reprocesa la atribución hasta **28 días** hacia atrás, así que una fecha capturada a D+1 todavía se mueve. No hay `--refresh-days`: la ventana entera se reescribe siempre.
+- Idempotente por `WRITE_TRUNCATE` sobre la partición `tabla$YYYYMMDD` — pisa día por día, nunca la tabla entera y nunca duplica.
+- Compras: cuenta **sólo** `omni_purchase`. `purchase`, `omni_purchase` y `offsite_conversion.fb_pixel_purchase` son la misma venta contada por canales distintos; sumar los tres triplica compras y revenue (validado contra el Ads Manager: 2.361 compras reales vs 7.113 sumando).
+- Errores de Meta: `#190` (token vencido) y `#200` (permisos) cortan con mensaje claro; `#4`/`#17` (rate limit) reintentan con backoff exponencial.
+
+> ⚠️ `META_ACCESS_TOKEN` es un token de **usuario** y expira cada **60 días** — hay que
+> regenerarlo a mano y actualizar el secret. Cuando vence, el step del daily sync corta
+> con `(#190) Token de Meta expirado` y el run se marca en rojo.
+
+---
+
 ## Configuración
 
 ### 1. Variables de entorno
@@ -128,6 +153,10 @@ SEARCH_CONSOLE_SITE_URL=sc-domain:tudominio.com.ar
 
 # Google Ads
 GOOGLE_ADS_CUSTOMER_ID=1234567890
+
+# Meta Ads — el token es de usuario y expira cada 60 días
+META_ACCESS_TOKEN=EAA...
+META_AD_ACCOUNT_ID=act_1234567890
 
 # VTEX
 VTEX_ACCOUNT=nombre-cuenta-vtex
@@ -172,6 +201,7 @@ pip install -r requirements.txt
 ```bash
 python sync_search_console.py --days 4
 python sync_google_ads.py --days 30 --refresh-days 21
+python sync_meta_ads.py
 python sync_vtex.py --days 30 --refresh-days 7
 python verify_vtex.py --days 30
 ```
@@ -179,5 +209,6 @@ python verify_vtex.py --days 30
 Es lo que corre `.github/workflows/daily_sync.yml` (todos los días 12:00 UTC = 09:00 ART).
 
 Los scripts son idempotentes: detectan las fechas ya cargadas en BigQuery y no duplican.
-Search Console y Google Ads saltean las fechas ya cargadas; VTEX además **recarga siempre**
-los últimos 7 días, porque el día en curso se sincroniza incompleto (ver arriba).
+Search Console saltea las fechas ya cargadas; Google Ads recarga los últimos 21 días,
+VTEX los últimos 7 (porque el día en curso se sincroniza incompleto) y Meta los últimos
+30 (porque reatribuye hasta 28 días hacia atrás).
