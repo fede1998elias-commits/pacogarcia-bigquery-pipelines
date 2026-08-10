@@ -64,6 +64,23 @@ jobs:
           GCP_PROJECT: ${{ secrets.GCP_PROJECT }}
         run: python sync_google_ads.py --days 30 --refresh-days 21
 
+      # Sin flags: corrida diaria = ventana móvil de los últimos 30 días, porque
+      # Meta reprocesa la atribución hasta 28 días hacia atrás. El WRITE_TRUNCATE
+      # por partición (tabla$YYYYMMDD) lo hace idempotente: pisa día por día y
+      # nunca duplica.
+      # OJO: META_ACCESS_TOKEN es un token de USUARIO y expira cada 60 días
+      # (vence 2026-09-11). Cuando caduque, este step corta con "(#190) Token de
+      # Meta expirado" y hay que regenerarlo a mano y actualizar el secret.
+      - name: Sync Meta Ads
+        id: meta_ads
+        continue-on-error: true
+        env:
+          GOOGLE_SERVICE_ACCOUNT_FILE: service_account.json
+          META_ACCESS_TOKEN: ${{ secrets.META_ACCESS_TOKEN }}
+          META_AD_ACCOUNT_ID: ${{ secrets.META_AD_ACCOUNT_ID }}
+          GCP_PROJECT: ${{ secrets.GCP_PROJECT }}
+        run: python sync_meta_ads.py
+
       # --refresh-days 7 es lo que evita el bug de truncado: este run carga el día
       # en curso incompleto (todavía faltan las ventas de la tarde), así que los
       # 7 días previos se vuelven a pisar siempre. El DELETE por fecha lo hace
@@ -107,12 +124,14 @@ jobs:
         run: |
           sc="${{ steps.search_console.outcome }}"
           ads="${{ steps.google_ads.outcome }}"
+          meta="${{ steps.meta_ads.outcome }}"
           vtex="${{ steps.vtex.outcome }}"
           ver="${{ steps.vtex_verify.outcome }}"
-          echo "Outcomes -> Search Console=$sc | Google Ads=$ads | VTEX=$vtex | VTEX verify=$ver"
+          echo "Outcomes -> Search Console=$sc | Google Ads=$ads | Meta Ads=$meta | VTEX=$vtex | VTEX verify=$ver"
           fail=0
           if [ "$sc" = "failure" ];   then echo "::error::Search Console sync failed"; fail=1; fi
           if [ "$ads" = "failure" ];  then echo "::error::Google Ads sync failed";     fail=1; fi
+          if [ "$meta" = "failure" ]; then echo "::error::Meta Ads sync failed -- si el log dice (#190), el token de usuario vencio y hay que regenerar el secret META_ACCESS_TOKEN"; fail=1; fi
           if [ "$vtex" = "failure" ]; then echo "::error::VTEX sync failed";           fail=1; fi
           if [ "$ver" = "failure" ]; then
             echo "::error::VTEX integrity check failed -- hay ordenes de VTEX que no estan en BigQuery. Ver el log del step 'Verify VTEX integrity'."
@@ -122,4 +141,4 @@ jobs:
             echo "Al menos un step fallo -- marcando el run como FAILED."
             exit 1
           fi
-          echo "Las 3 syncs y el chequeo de integridad de VTEX terminaron OK."
+          echo "Las 4 syncs y el chequeo de integridad de VTEX terminaron OK."
