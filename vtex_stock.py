@@ -86,12 +86,13 @@ from vtex import _base, _headers
 load_dotenv()
 sys.stdout.reconfigure(encoding="utf-8")
 
-# vtex.py lee VTEX_ACCOUNT sin default; sync_vtex.py sí lo tiene. Se replica acá
-# para que el módulo corra igual cuando el .env no define la cuenta.
-# DEUDA: si esto pasa a correr en GitHub Actions, sacar el setdefault y dejar
-# que falle fuerte. Un default silencioso en CI apunta a la cuenta equivocada
-# sin avisar; en local es sólo comodidad.
-os.environ.setdefault("VTEX_ACCOUNT", "pacogarcia")
+# NO hay default para VTEX_ACCOUNT (se sacó el setdefault al pasar a GitHub
+# Actions): un default silencioso en CI apunta a la cuenta equivocada sin avisar.
+# La cuenta llega por el secret VTEX_ACCOUNT, y su ausencia tiene que romper el
+# run. Todas las credenciales salen del entorno — secrets en Actions, .env en
+# local — y este módulo no conoce ninguna ruta fuera de su propio repo.
+# La validación vive en main() y no acá a propósito: verify_stock.py importa este
+# módulo, y un exit a nivel import lo rompería sin necesitar credenciales VTEX.
 
 # ── Configuración ─────────────────────────────────────────────────────────────
 SERVICE_ACCOUNT_FILE = os.environ.get("GOOGLE_SERVICE_ACCOUNT_FILE",
@@ -775,6 +776,21 @@ def print_summary(s: dict, ds: str, path: Path, loaded_bq: bool) -> None:
     print(f"   BigQuery               : {'cargado en ' + table_ref() if loaded_bq else 'NO cargado (sin --load-bq)'}")
 
 
+# ── Validación de entorno ─────────────────────────────────────────────────────
+def _exigir_entorno(*names: str) -> None:
+    """
+    Corta antes de empezar si falta una credencial, en vez de descubrirlo a mitad
+    de una corrida de 60 minutos. Sin VTEX_ACCOUNT el KeyError de vtex.py sale
+    recién en la primera request, y dentro del ThreadPoolExecutor de la fase ②
+    quedaría contado como "producto fallido" en lugar de romper el run.
+    """
+    faltan = [n for n in names if not (os.environ.get(n) or "").strip()]
+    if faltan:
+        sys.exit(f"❌ Faltan variables de entorno: {', '.join(faltan)}. "
+                 f"En GitHub Actions vienen de los secrets del repo; "
+                 f"en local, del .env.")
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 def main() -> int:
     ap = argparse.ArgumentParser(description="Snapshot de stock VTEX por SKU × depósito")
@@ -790,6 +806,14 @@ def main() -> int:
     ap.add_argument("--limit", type=int, default=None,
                     help="Corta el universo en N productos (pruebas)")
     args = ap.parse_args()
+
+    _exigir_entorno("VTEX_ACCOUNT", "VTEX_APP_KEY", "VTEX_APP_TOKEN")
+    # Con --load-bq, validar el service account ANTES de las ~18k llamadas a
+    # VTEX: si falta, la corrida moriría en la fase ④, después de una hora.
+    if args.load_bq and not Path(SERVICE_ACCOUNT_FILE).is_file():
+        sys.exit(f"❌ --load-bq pero no existe el service account "
+                 f"{SERVICE_ACCOUNT_FILE!r} (GOOGLE_SERVICE_ACCOUNT_FILE, "
+                 f"relativo al directorio de trabajo).")
 
     ds        = snapshot_date_ars().isoformat()
     synced_at = datetime.now(timezone.utc).isoformat()
@@ -923,6 +947,16 @@ def main() -> int:
     path = write_csv(rows, ds)
     summary = build_summary(rows, objetivo, done_ids, failed_skus,
                             failed_products, failed_details, product_ids)
+
+    # Guardrail: bq_load hace DELETE de la snapshot_date y recién después LOAD.
+    # Con rows vacío eso borra la carga del día y no la repone. Es alcanzable sin
+    # que salte ninguna excepción: si GetProductAndSkuIds devuelve 403/404,
+    # fetch_product_ids avisa y devuelve [], y la corrida sigue con 0 filas. En un
+    # job diario desatendido eso sería pérdida de datos silenciosa.
+    if args.load_bq and not rows:
+        print("\n❌ 0 filas: no se carga a BigQuery, para no borrar la snapshot "
+              "del día con un DELETE seguido de un LOAD vacío.")
+        return 1
 
     # ── BigQuery ──────────────────────────────────────────────────────────────
     loaded_bq = False

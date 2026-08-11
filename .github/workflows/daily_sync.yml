@@ -116,6 +116,30 @@ jobs:
           GCP_PROJECT: ${{ secrets.GCP_PROJECT }}
         run: python verify_vtex.py --days 30
 
+      # Snapshot de stock: NO es una ventana móvil como las otras syncs, es una
+      # foto del stock de HOY, una fila por sku_id × warehouse_id. El DELETE de la
+      # snapshot_date + LOAD lo hace idempotente, igual que el resto.
+      # Sin --resume a propósito: el runner es efímero, no hay checkpoint de una
+      # corrida anterior que retomar, así que en Actions arranca siempre de cero.
+      # --active-only limita el inventario a los ~17,6k SKUs activos; sin el flag
+      # serían ~106k (todo el histórico de baja) y unas 2 horas.
+      # timeout-minutes 100: la corrida completa medida el 2026-08-11 fueron 61
+      # min. El default de un job son 360, así que sin este límite un cuelgue se
+      # comería 6 horas de runner. Con continue-on-error, pasarse de los 100 min
+      # deja el step en failure pero no corta las syncs anteriores, que ya
+      # terminaron.
+      - name: Snapshot stock VTEX
+        id: vtex_stock
+        continue-on-error: true
+        timeout-minutes: 100
+        env:
+          GOOGLE_SERVICE_ACCOUNT_FILE: service_account.json
+          VTEX_ACCOUNT: ${{ secrets.VTEX_ACCOUNT }}
+          VTEX_APP_KEY: ${{ secrets.VTEX_APP_KEY }}
+          VTEX_APP_TOKEN: ${{ secrets.VTEX_APP_TOKEN }}
+          GCP_PROJECT: ${{ secrets.GCP_PROJECT }}
+        run: python vtex_stock.py --active-only --load-bq
+
       # Gate final: continue-on-error deja cada sync en verde aunque falle,
       # así que revisamos el outcome REAL de cada una y fallamos el run si
       # alguna rompió. Esto es lo que hace que el run se vea rojo de verdad.
@@ -127,7 +151,8 @@ jobs:
           meta="${{ steps.meta_ads.outcome }}"
           vtex="${{ steps.vtex.outcome }}"
           ver="${{ steps.vtex_verify.outcome }}"
-          echo "Outcomes -> Search Console=$sc | Google Ads=$ads | Meta Ads=$meta | VTEX=$vtex | VTEX verify=$ver"
+          stock="${{ steps.vtex_stock.outcome }}"
+          echo "Outcomes -> Search Console=$sc | Google Ads=$ads | Meta Ads=$meta | VTEX=$vtex | VTEX verify=$ver | Stock=$stock"
           fail=0
           if [ "$sc" = "failure" ];   then echo "::error::Search Console sync failed"; fail=1; fi
           if [ "$ads" = "failure" ];  then echo "::error::Google Ads sync failed";     fail=1; fi
@@ -137,8 +162,16 @@ jobs:
             echo "::error::VTEX integrity check failed -- hay ordenes de VTEX que no estan en BigQuery. Ver el log del step 'Verify VTEX integrity'."
             fail=1
           fi
+          # El snapshot de stock queda FUERA del gate duro a proposito: es nuevo,
+          # tarda ~1h y todavia no lo consume ningun tablero. Si falla avisa, pero
+          # no ensucia el rojo/verde de las 5 syncs que ya son confiables.
+          # Para promoverlo a error duro cuando este rodado: cambiar ::warning::
+          # por ::error:: y agregar fail=1 abajo.
+          if [ "$stock" = "failure" ]; then
+            echo "::warning::Snapshot de stock VTEX fallo o se paso de timeout-minutes. NO marca el run como fallido -- ver el log del step 'Snapshot stock VTEX'."
+          fi
           if [ "$fail" = "1" ]; then
             echo "Al menos un step fallo -- marcando el run como FAILED."
             exit 1
           fi
-          echo "Las 4 syncs y el chequeo de integridad de VTEX terminaron OK."
+          echo "Las 4 syncs y el chequeo de integridad de VTEX terminaron OK (stock=$stock, informativo)."
