@@ -46,8 +46,10 @@ jobs:
       # timeout-minutes 100: la corrida completa medida el 2026-08-11 fueron 61
       # min. El default de un job son 360, así que sin este límite un cuelgue se
       # comería 6 horas de runner.
-      # Sin continue-on-error: es el único step de trabajo del workflow, así que si
-      # falla tiene que verse rojo directamente. No hay nada más que proteger.
+      # Sin continue-on-error, acá y en el verificador de abajo: este workflow tiene
+      # una sola fuente, así que si algo falla tiene que verse rojo directamente. No
+      # hay 5 syncs que proteger de un rojo ajeno como en el daily, y por eso tampoco
+      # hace falta el gate final que el daily usa para releer los outcomes.
       - name: Snapshot stock VTEX
         timeout-minutes: 100
         env:
@@ -57,3 +59,39 @@ jobs:
           VTEX_APP_TOKEN: ${{ secrets.VTEX_APP_TOKEN }}
           GCP_PROJECT: ${{ secrets.GCP_PROJECT }}
         run: python vtex_stock.py --active-only --load-bq
+
+      # Guardrail, mismo rol que 'Verify VTEX integrity' en el daily_sync. Existe
+      # porque una snapshot de inventario falla en silencio: vtex_stock.py tolera
+      # SKUs fallidos a propósito (con ~18k llamadas, cortar en el primer 429 sería
+      # inusable), y entonces el CSV se escribe igual y el resumen imprime igual
+      # aunque falte stock. Un vendible 5% más bajo de lo real se ve normal. Este
+      # step es lo único que grita.
+      #
+      # Corre en el MISMO job que el snapshot, no en uno aparte, porque compara el
+      # CSV y el meta.json contra lo que quedó en BigQuery — y esos archivos viven
+      # en el runner efímero, se pierden al terminar el job.
+      #
+      # Sin argumentos: audita la snapshot de HOY (UTC-3), que es justo la que
+      # acaba de cargar el step anterior. Sin --warn-only y sin continue-on-error a
+      # propósito: si la carga no cuadra, el run tiene que verse rojo. Si sólo
+      # avisara, el aviso viviría enterrado en un log que nadie abre.
+      #
+      # Ojo con el historial: hasta el commit 0e316da este verificador daba exit 1
+      # en TODA corrida por 13 product_ids fantasma que están en el índice de VTEX
+      # pero dan 404 (no es stock perdido: un producto que da 404 no tiene SKUs).
+      # Se filtran vía PRODUCT_IDS_FANTASMA en vtex_stock.py, ya en master, y las
+      # corridas del 12 y 13 de agosto reportaron 'fallidos: 0'. Si vuelve a
+      # aparecer un exit 1 por productos fallidos, chequear si hay IDs fantasma
+      # NUEVOS y agregarlos a esa constante — no bajarle el estándar al verificador.
+      - name: Verificar integridad del snapshot
+        env:
+          GOOGLE_SERVICE_ACCOUNT_FILE: service_account.json
+          VTEX_ACCOUNT: ${{ secrets.VTEX_ACCOUNT }}
+          VTEX_APP_KEY: ${{ secrets.VTEX_APP_KEY }}
+          VTEX_APP_TOKEN: ${{ secrets.VTEX_APP_TOKEN }}
+          GCP_PROJECT: ${{ secrets.GCP_PROJECT }}
+        run: |
+          python verify_stock.py || {
+            echo "::error::La snapshot de stock no cuadra -- puede haber stock faltante en BigQuery. Ver el log de este step: el detalle esta en los bloques (1) conjuntos de sku_id, (2) fallos de API y (3) CSV vs BigQuery."
+            exit 1
+          }
