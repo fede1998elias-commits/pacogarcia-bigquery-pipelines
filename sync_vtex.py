@@ -170,8 +170,28 @@ def _parse_raw_order(o: dict) -> dict:
     }
 
 
+def _sleep_rate_limited(resp, attempt: int) -> float:
+    """
+    Segundos a esperar ante un 429/5xx: lo que pide VTEX en Retry-After (tope 60 s)
+    o un backoff exponencial largo.
+
+    Existe porque el backoff viejo (2 ** attempt → 2 y 4 s) era MÁS CORTO que la
+    ventana de rate limit de VTEX: los 3 intentos se agotaban adentro del mismo
+    429 y la fecha se reportaba como error de API. Eso rompió el run #68 del
+    daily_sync (2026-08-15) con 0 órdenes faltantes.
+    """
+    if resp is not None:
+        ra = resp.headers.get("Retry-After")
+        if ra:
+            try:
+                return min(float(ra), 60.0)
+            except ValueError:
+                pass
+    return min(5 * 2 ** (attempt - 1), 60.0)   # 5, 10, 20, 40, 60
+
+
 def _paginate_window(
-    utc_start: str, utc_end: str, retries: int = 3
+    utc_start: str, utc_end: str, retries: int = 5
 ) -> tuple[list[dict] | None, bool]:
     """
     Pagina órdenes en un rango UTC.
@@ -204,10 +224,17 @@ def _paginate_window(
                 data = resp.json()
                 break
             except requests.HTTPError as e:
-                if e.response is not None and e.response.status_code == 400 and page > 1:
+                resp_err = e.response
+                code = resp_err.status_code if resp_err is not None else None
+                if code == 400 and page > 1:
                     return orders, True   # límite de paginación
                 if attempt < retries:
-                    time.sleep(2 ** attempt)
+                    # 429 y 5xx son transitorios: esperar lo que pide VTEX, no el
+                    # backoff corto de siempre. Ver _sleep_rate_limited().
+                    if code == 429 or (code or 0) >= 500:
+                        time.sleep(_sleep_rate_limited(resp_err, attempt))
+                    else:
+                        time.sleep(2 ** attempt)
                 else:
                     return None, False    # error real de API
             except Exception as e:
@@ -229,7 +256,7 @@ def _paginate_window(
 
 
 def _fetch_recursive(
-    utc_start: str, utc_end: str, retries: int = 3, depth: int = 0
+    utc_start: str, utc_end: str, retries: int = 5, depth: int = 0
 ) -> list[dict] | None:
     """
     Trae órdenes en un rango UTC dividiéndose recursivamente si supera el límite.
@@ -263,7 +290,7 @@ def _fetch_recursive(
     return left + right
 
 
-def fetch_orders_for_date(ars_date: date, retries: int = 3) -> list[dict] | None:
+def fetch_orders_for_date(ars_date: date, retries: int = 5) -> list[dict] | None:
     """
     Trae todos los pedidos de un día calendario de Argentina.
     Maneja el límite de 3.000 órdenes de VTEX via split recursivo.

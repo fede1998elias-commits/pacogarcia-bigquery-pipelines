@@ -100,6 +100,15 @@ jobs:
           GCP_PROJECT: ${{ secrets.GCP_PROJECT }}
         run: python sync_vtex.py --days 30 --refresh-days 7
 
+      # Colchón entre la sync y la auditoría. Las dos le piden a VTEX los MISMOS
+      # 30 días, y el verify arrancaba en el mismo segundo en que la sync
+      # terminaba de hacer sus cientos de llamadas de detalle. VTEX rate-limitea:
+      # el run #68 (2026-08-15) juntó 25 respuestas 429 y dejó una fecha sin
+      # verificar, con 0 órdenes faltantes. verify_vtex.py ya throttlea y
+      # reintenta por su cuenta; estos 30 s son el seguro de arriba.
+      - name: Cooldown antes de auditar VTEX
+        run: sleep 30
+
       # Guardrail: compara VTEX contra BQ día por día y rompe el run si falta
       # una sola orden. Audita días CERRADOS (excluye hoy, que es parcial por
       # definición), así que valida el trabajo de los runs anteriores.
@@ -141,7 +150,7 @@ jobs:
           if [ "$meta" = "failure" ]; then echo "::error::Meta Ads sync failed -- si el log dice (#190), el token de usuario vencio y hay que regenerar el secret META_ACCESS_TOKEN"; fail=1; fi
           if [ "$vtex" = "failure" ]; then echo "::error::VTEX sync failed";           fail=1; fi
           if [ "$ver" = "failure" ]; then
-            echo "::error::VTEX integrity check failed -- hay ordenes de VTEX que no estan en BigQuery. Ver el log del step 'Verify VTEX integrity'."
+            echo "::error::VTEX integrity check failed. Hay CUATRO causas posibles y el mensaje viejo afirmaba siempre la primera: (a) ordenes de VTEX que no estan en BigQuery, (b) order_id duplicados, (c) ordenes con items_count>0 sin filas en order_items, o (d) fechas que no se pudieron verificar por error o rate limit de la API de VTEX -- la (d) NO es un hueco de datos, es falta de comprobacion. Abrir el log del step 'Verify VTEX integrity' y leer el bloque 'Resumen': ahi dice cual de las cuatro es."
             fail=1
           fi
           if [ "$fail" = "1" ]; then
