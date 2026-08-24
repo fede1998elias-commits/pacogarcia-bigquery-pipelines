@@ -11,9 +11,13 @@ colapsa a un número por SKU, el stock "vendible" de la web queda inflado con
 unidades que no le corresponden (~1% en la práctica). Por eso la tabla guarda
 una fila por depósito y las vistas deciden qué depósito mirar:
 
-  vw_stock_vendible  → is_active = true AND warehouse_id = '1_1'.  ESTE es el
-                       stock real de la web. Es el número que hay que usar.
-  vw_stock_por_sku   → 1_1 y 1_3 en columnas separadas, sin colapsar.
+  vw_stock_vendible  → is_active = true AND warehouse_id = '1_1' AND
+                       available_quantity > 0.  ESTE es el stock real de la web
+                       y es el número que hay que usar: lo que se puede vender
+                       hoy, ya sin los SKUs agotados.
+  vw_stock_por_deposito → 1_1 y 1_3 en columnas separadas, sin colapsar. SÍ
+                       incluye los SKUs en cero, porque existe para control de
+                       totales.
 
 FLUJO (todo lo caro escala con PRODUCTOS, no con SKUs)
   1. GetProductAndSkuIds (paginado)          → universo de productos (~17.563)
@@ -103,7 +107,7 @@ BQ_LOCATION = "US"
 TABLE_STOCK = "stock_snapshot"
 
 VIEW_VENDIBLE = "vw_stock_vendible"
-VIEW_POR_SKU  = "vw_stock_por_sku"
+VIEW_POR_DEPOSITO = "vw_stock_por_deposito"
 
 # Depósito de la web. Ver docstring: NO es intercambiable con el total.
 WAREHOUSE_WEB = "1_1"
@@ -573,31 +577,40 @@ def ensure_views(bq: bigquery.Client) -> None:
     -- Stock REAL de la web: sólo SKUs activos y sólo el depósito {WAREHOUSE_WEB}.
     -- Sumar todos los depósitos mete el stock de Mercado Libre ({WAREHOUSE_ML})
     -- e infla el vendible ~1%.
-    SELECT
-      snapshot_date,
-      sku_id,
-      ANY_VALUE(product_id)     AS product_id,
-      ANY_VALUE(sku_ref_id)     AS sku_ref_id,
-      ANY_VALUE(product_ref_id) AS product_ref_id,
-      ANY_VALUE(sku_name)       AS sku_name,
-      ANY_VALUE(product_name)   AS product_name,
-      SUM(total_quantity)       AS total_quantity,
-      SUM(reserved_quantity)    AS reserved_quantity,
-      SUM(available_quantity)   AS available_quantity,
-      LOGICAL_OR(has_unlimited_quantity) AS has_unlimited_quantity
-    FROM {tbl}
-    WHERE snapshot_date = (SELECT MAX(snapshot_date) FROM {tbl})
-      AND is_active
-      AND warehouse_id = '{WAREHOUSE_WEB}'
-    GROUP BY snapshot_date, sku_id
+    --
+    -- El available_quantity > 0 va en un wrapper de AFUERA, no en el WHERE de
+    -- adentro: así filtra sobre el SUM ya agregado, que es el disponible real
+    -- del SKU en {WAREHOUSE_WEB}. Adentro filtraría fila por fila, antes de
+    -- agregar, y es otra pregunta. "Vendible" es lo que se puede vender hoy,
+    -- no el catálogo activo: los agotados quedan afuera.
+    SELECT * FROM (
+      SELECT
+        snapshot_date,
+        sku_id,
+        ANY_VALUE(product_id)     AS product_id,
+        ANY_VALUE(sku_ref_id)     AS sku_ref_id,
+        ANY_VALUE(product_ref_id) AS product_ref_id,
+        ANY_VALUE(sku_name)       AS sku_name,
+        ANY_VALUE(product_name)   AS product_name,
+        SUM(total_quantity)       AS total_quantity,
+        SUM(reserved_quantity)    AS reserved_quantity,
+        SUM(available_quantity)   AS available_quantity,
+        LOGICAL_OR(has_unlimited_quantity) AS has_unlimited_quantity
+      FROM {tbl}
+      WHERE snapshot_date = (SELECT MAX(snapshot_date) FROM {tbl})
+        AND is_active
+        AND warehouse_id = '{WAREHOUSE_WEB}'
+      GROUP BY snapshot_date, sku_id
+    )
+    WHERE available_quantity > 0
     """
 
-    sql_por_sku = f"""
-    CREATE OR REPLACE VIEW `{GCP_PROJECT}.{BQ_DATASET}.{VIEW_POR_SKU}` AS
+    sql_por_deposito = f"""
+    CREATE OR REPLACE VIEW `{GCP_PROJECT}.{BQ_DATASET}.{VIEW_POR_DEPOSITO}` AS
     -- Un SKU tiene balance en {WAREHOUSE_WEB} y {WAREHOUSE_ML} a la vez: van en
     -- columnas separadas, no colapsados. disponible_todos_depositos existe para
     -- control de totales — NO es el stock vendible de la web (ese es
-    -- disponible_{WAREHOUSE_WEB} filtrando is_active, o {VIEW_VENDIBLE}).
+    -- disponible_{WAREHOUSE_WEB} filtrando is_active y > 0, o {VIEW_VENDIBLE}).
     SELECT
       snapshot_date,
       sku_id,
@@ -627,7 +640,7 @@ def ensure_views(bq: bigquery.Client) -> None:
     GROUP BY snapshot_date, sku_id
     """
 
-    for sql in (sql_vendible, sql_por_sku):
+    for sql in (sql_vendible, sql_por_deposito):
         bq.query(sql).result()
 
 
@@ -976,7 +989,7 @@ def main() -> int:
         ensure_views(bq)
         loaded_bq = True
         print(f"   ✅ {len(rows):,} filas en {table_ref()}")
-        print(f"   ✅ Vistas {VIEW_VENDIBLE} y {VIEW_POR_SKU} actualizadas")
+        print(f"   ✅ Vistas {VIEW_VENDIBLE} y {VIEW_POR_DEPOSITO} actualizadas")
 
     meta_path(ds).write_text(json.dumps({
         "snapshot_date":   ds,
